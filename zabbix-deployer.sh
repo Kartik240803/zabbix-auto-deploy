@@ -3,7 +3,7 @@
 # ------------------------
 # Zabbix Auto Installer with Upgrade Functionality
 # Enhanced Script with Local Config File, Logging, Progress Bar, and Robust Error Handling
-# Updated for latest Zabbix repository URL structure
+# Updated for latest Zabbix repository URL structure and robust version parsing
 # ------------------------
 
 # Log file setup
@@ -461,11 +461,36 @@ upgrade_zabbix() {
 
   # Verify upgrade
   log_msg "🔍 Verifying Zabbix version..." yes
-  local installed_version=$(zabbix_server -V | grep -oP 'Zabbix \K[0-9]+\.[0-9]+')
+  local raw_version_output
+  raw_version_output=$(zabbix_server -V 2>&1) || {
+    log_msg "⚠️ Failed to run 'zabbix_server -V'. Output: $raw_version_output" yes
+    print_msg "⚠️ Could not verify Zabbix version automatically. Please check manually with: zabbix_server -V" yes
+    exit 1
+  }
+  log_msg "Raw zabbix_server -V output: $raw_version_output" yes
+
+  local installed_version
+  installed_version=$(echo "$raw_version_output" | head -n1 | awk '/Zabbix/ {split($3, a, "."); print a[1]"."a[2]}') || {
+    log_msg "⚠️ Failed to parse Zabbix version with awk." yes
+    print_msg "⚠️ Version verification failed. Run 'zabbix_server -V' manually to confirm the version." yes
+    print_msg "Expected version: $version" yes
+    exit 1
+  }
+  log_msg "Parsed installed version: $installed_version" yes
+
+  if [[ -z "$installed_version" ]]; then
+    log_msg "⚠️ Parsed version is empty." yes
+    print_msg "⚠️ Version verification failed. Run 'zabbix_server -V' manually to confirm the version." yes
+    print_msg "Expected version: $version" yes
+    exit 1
+  fi
+
   if [[ "$installed_version" == "$version" ]]; then
     log_msg "✅ Zabbix successfully upgraded to version $version." yes
   else
     log_msg "❌ Upgrade verification failed. Expected version $version, found $installed_version." yes
+    print_msg "❌ Upgrade verification failed. Expected version $version, found $installed_version." yes
+    print_msg "Run 'zabbix_server -V' to check the installed version." yes
     exit 1
   fi
   print_progress "Version Verification"
