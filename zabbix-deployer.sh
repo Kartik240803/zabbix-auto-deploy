@@ -3,6 +3,7 @@
 # ------------------------
 # Zabbix Auto Installer with Upgrade Functionality
 # Enhanced Script with Local Config File, Logging, Progress Bar, and Robust Error Handling
+# Updated for latest Zabbix repository URL structure
 # ------------------------
 
 # Log file setup
@@ -110,26 +111,32 @@ get_zabbix_repo_url() {
   local distro="$2"
   local os_version="$3"
   local arch="$4"
+  local url=""
+
+  log_msg "Generating repo URL for version=$version, distro=$distro, os_version=$os_version, arch=$arch" yes
 
   case "$distro" in
     ubuntu)
       if [[ "$arch" == "arm64" ]]; then
-        echo "https://repo.zabbix.com/zabbix/${version}/ubuntu-arm64/pool/main/z/zabbix-release/zabbix-release_${version}-1+ubuntu${os_version}_all.deb"
+        url="https://repo.zabbix.com/zabbix/${version}/ubuntu-arm64/pool/main/z/zabbix-release/zabbix-release_latest_${version}+ubuntu${os_version}_all.deb"
       else
-        echo "https://repo.zabbix.com/zabbix/${version}/ubuntu/pool/main/z/zabbix-release/zabbix-release_${version}-1+ubuntu${os_version}_all.deb"
+        url="https://repo.zabbix.com/zabbix/${version}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_${version}+ubuntu${os_version}_all.deb"
       fi
       ;;
     sles)
-      echo "https://repo.zabbix.com/zabbix/${version}/sles/${os_version}/${arch}/zabbix-release-${version}-1.sles${os_version}.noarch.rpm"
+      url="https://repo.zabbix.com/zabbix/${version}/sles/${os_version}/${arch}/zabbix-release-${version}-1.sles${os_version}.noarch.rpm"
       ;;
     centos)
-      echo "https://repo.zabbix.com/zabbix/${version}/rhel/${os_version}/${arch}/zabbix-release-${version}-1.el${os_version}.noarch.rpm"
+      url="https://repo.zabbix.com/zabbix/${version}/rhel/${os_version}/${arch}/zabbix-release-${version}-1.el${os_version}.noarch.rpm"
       ;;
     *)
       log_msg "❌ Unsupported distro: $distro" yes
       exit 1
       ;;
   esac
+
+  log_msg "Generated repo URL: $url" yes
+  echo "$url"
 }
 
 # Backup Zabbix components
@@ -289,7 +296,11 @@ install_zabbix() {
   case "$DISTRO" in
     ubuntu)
       log_msg "Downloading Zabbix repository: $url" yes
-      wget -q "$url" -O /tmp/zabbix-release.deb || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+      wget -q --timeout=10 --tries=3 "$url" -O /tmp/zabbix-release.deb || {
+        log_msg "❌ Failed to download Zabbix repo: $url. Check network or URL availability." yes
+        log_msg "Try manually: wget $url" yes
+        exit 1
+      }
       dpkg -i /tmp/zabbix-release.deb || { log_msg "❌ Failed to install Zabbix repo package." yes; exit 1; }
       apt update || { log_msg "❌ Failed to update apt after adding Zabbix repo." yes; exit 1; }
 
@@ -410,7 +421,11 @@ upgrade_zabbix() {
 
   # Update repository
   log_msg "🌐 Updating Zabbix repository to version $version: $url" yes
-  wget -q "$url" -O /tmp/zabbix-release.deb || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+  wget -q --timeout=10 --tries=3 "$url" -O /tmp/zabbix-release.deb || {
+    log_msg "❌ Failed to download Zabbix repo: $url. Check network or URL availability." yes
+    log_msg "Try manually: wget $url" yes
+    exit 1
+  }
   dpkg -i /tmp/zabbix-release.deb || { log_msg "❌ Failed to install Zabbix repo package." yes; exit 1; }
   apt update || { log_msg "❌ Failed to update apt after adding Zabbix repo." yes; exit 1; }
   print_progress "Repository Update"
