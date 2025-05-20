@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ------------------------
-# Zabbix Auto Installer
+# Zabbix Auto Installer with Upgrade Functionality
 # Enhanced Script with Local Config File, Logging, Progress Bar, and Robust Error Handling
 # ------------------------
 
@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/zabbix_server_config.conf"
 
 # Progress bar variables
-TOTAL_STEPS=5  # Prerequisites, Database Install, Zabbix Install, Database Config, Server Config
+TOTAL_STEPS=5  # Adjusted for upgrade: Backup, Repo Update, Upgrade, Restart, Verify
 CURRENT_STEP=0
 
 # Log function to write to both console and log file
@@ -130,6 +130,35 @@ get_zabbix_repo_url() {
       exit 1
       ;;
   esac
+}
+
+# Backup Zabbix components
+backup_zabbix() {
+  local backup_dir="/opt/zabbix-backup-$(date +%Y%m%d_%H%M%S)"
+  log_msg "🗄 Creating backup in $backup_dir..." yes
+
+  mkdir -p "$backup_dir" || { log_msg "❌ Failed to create backup directory." yes; exit 1; }
+  cp -r /etc/zabbix "$backup_dir/etc_zabbix" || { log_msg "❌ Failed to backup /etc/zabbix." yes; exit 1; }
+  if [[ -d /etc/apache2 ]]; then
+    cp -r /etc/apache2 "$backup_dir/etc_apache2" || { log_msg "❌ Failed to backup /etc/apache2." yes; exit 1; }
+  fi
+  if [[ -d /etc/nginx ]]; then
+    cp -r /etc/nginx "$backup_dir/etc_nginx" || { log_msg "❌ Failed to backup /etc/nginx." yes; exit 1; }
+  fi
+  cp -r /usr/share/zabbix "$backup_dir/usr_share_zabbix" || { log_msg "❌ Failed to backup /usr/share/zabbix." yes; exit 1; }
+
+  # Backup database
+  local db="$1"
+  if [[ "$db" == "mysql" ]]; then
+    log_msg "🗄 Backing up MySQL database..." yes
+    mysqldump -uroot zabbix > "$backup_dir/zabbix_db.sql" || { log_msg "❌ Failed to backup MySQL database." yes; exit 1; }
+  elif [[ "$db" == "pgsql" ]]; then
+    log_msg "🗄 Backing up PostgreSQL database..." yes
+    sudo -u postgres pg_dump zabbix > "$backup_dir/zabbix_db.sql" || { log_msg "❌ Failed to backup PostgreSQL database." yes; exit 1; }
+  fi
+
+  log_msg "✅ Backup completed in $backup_dir." yes
+  print_progress "Backup"
 }
 
 # Install database server
@@ -358,6 +387,75 @@ install_zabbix() {
   print_progress "Zabbix Installation"
 }
 
+# Upgrade Zabbix
+upgrade_zabbix() {
+  local version="$1"
+  local db="$2"
+  local webserver="$3"
+  local url=$(get_zabbix_repo_url "$version" "$DISTRO" "$OS_VERSION" "$ARCH")
+
+  log_msg "🔄 Upgrading Zabbix to version $version for $DISTRO $OS_VERSION with $db and $webserver..." yes
+
+  # Stop Zabbix services
+  log_msg "🛑 Stopping Zabbix services..." yes
+  systemctl stop zabbix-server zabbix-agent2 || { log_msg "❌ Failed to stop Zabbix services." yes; exit 1; }
+  if [[ "$webserver" == "apache" ]]; then
+    systemctl stop apache2 || { log_msg "❌ Failed to stop apache2." yes; exit 1; }
+  elif [[ "$webserver" == "nginx" ]]; then
+    systemctl stop nginx php8.1-fpm || { log_msg "❌ Failed to stop nginx or php8.1-fpm." yes; exit 1; }
+  fi
+
+  # Backup Zabbix components
+  backup_zabbix "$db"
+
+  # Update repository
+  log_msg "🌐 Updating Zabbix repository to version $version: $url" yes
+  wget -q "$url" -O /tmp/zabbix-release.deb || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+  dpkg -i /tmp/zabbix-release.deb || { log_msg "❌ Failed to install Zabbix repo package." yes; exit 1; }
+  apt update || { log_msg "❌ Failed to update apt after adding Zabbix repo." yes; exit 1; }
+  print_progress "Repository Update"
+
+  # Upgrade Zabbix packages
+  local packages=()
+  if [[ "$db" == "mysql" ]]; then
+    packages+=(zabbix-server-mysql)
+  elif [[ "$db" == "pgsql" ]]; then
+    packages+=(zabbix-server-pgsql)
+  fi
+  packages+=(zabbix-frontend-php zabbix-agent2 zabbix-agent2-plugin-mongodb zabbix-agent2-plugin-mssql zabbix-agent2-plugin-postgresql)
+  if [[ "$webserver" == "apache" ]]; then
+    packages+=(zabbix-apache-conf)
+  elif [[ "$webserver" == "nginx" ]]; then
+    packages+=(zabbix-nginx-conf)
+  fi
+
+  log_msg "📦 Upgrading Zabbix packages: ${packages[*]}" yes
+  # Use --only-upgrade to ensure only installed packages are updated
+  DEBIAN_FRONTEND=noninteractive apt install -y --only-upgrade "${packages[@]}" || { log_msg "❌ Failed to upgrade Zabbix packages: ${packages[*]}" yes; exit 1; }
+  print_progress "Zabbix Upgrade"
+
+  # Restart services
+  log_msg "🔄 Restarting services..." yes
+  systemctl restart zabbix-server zabbix-agent2 || { log_msg "❌ Failed to restart Zabbix services." yes; exit 1; }
+  if [[ "$webserver" == "apache" ]]; then
+    systemctl restart apache2 || { log_msg "❌ Failed to restart apache2." yes; exit 1; }
+  elif [[ "$webserver" == "nginx" ]]; then
+    systemctl restart nginx php8.1-fpm || { log_msg "❌ Failed to restart nginx or php8.1-fpm." yes; exit 1; }
+  fi
+  print_progress "Service Restart"
+
+  # Verify upgrade
+  log_msg "🔍 Verifying Zabbix version..." yes
+  local installed_version=$(zabbix_server -V | grep -oP 'Zabbix \K[0-9]+\.[0-9]+')
+  if [[ "$installed_version" == "$version" ]]; then
+    log_msg "✅ Zabbix successfully upgraded to version $version." yes
+  else
+    log_msg "❌ Upgrade verification failed. Expected version $version, found $installed_version." yes
+    exit 1
+  fi
+  print_progress "Version Verification"
+}
+
 # Uninstall Zabbix
 uninstall_zabbix() {
   log_msg "🧹 Stopping and disabling Zabbix services..." yes
@@ -432,7 +530,7 @@ MODE=""
 ZBX_VERSION=""
 DB=""
 WEBSERVER=""
-DB_PASSWORD=""
+ACTION=""
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -454,10 +552,14 @@ while [[ "$#" -gt 0 ]]; do
       WEBSERVER="$2"
       shift
       ;;
+    --install)
+      ACTION="install"
+      ;;
+    --upgrade)
+      ACTION="upgrade"
+      ;;
     --uninstall)
-      get_os_info
-      uninstall_zabbix
-      exit 0
+      ACTION="uninstall"
       ;;
     *)
       log_msg "❌ Unknown option: $1" yes
@@ -468,28 +570,35 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Validate inputs
-if [[ -z "$MODE" || -z "$ZBX_VERSION" || -z "$DB" || -z "$WEBSERVER" ]]; then
-  log_msg "Usage: $0 [--default|--manual] --version <zabbix_version> --db <mysql|pgsql> --webserver <apache|nginx]" yes
+if [[ -z "$ACTION" ]]; then
+  log_msg "Usage: $0 [--install|--upgrade|--uninstall] [--default|--manual] --version <zabbix_version> --db <mysql|pgsql> --webserver <apache|nginx>" yes
   exit 1
 fi
 
-if [[ ! "$ZBX_VERSION" =~ ^(6\.0|6\.4|7\.0)$ ]]; then
-  log_msg "❌ Invalid Zabbix version: $ZBX_VERSION. Allowed versions are: 6.0, 6.4, 7.0." yes
-  exit 1
+if [[ "$ACTION" != "uninstall" ]]; then
+  if [[ -z "$ZBX_VERSION" || -z "$DB" || -z "$WEBSERVER" ]]; then
+    log_msg "Usage: $0 [--install|--upgrade] [--default|--manual] --version <zabbix_version> --db <mysql|pgsql> --webserver <apache|nginx]" yes
+    exit 1
+  fi
+
+  if [[ ! "$ZBX_VERSION" =~ ^(6\.0|6\.4|7\.0)$ ]]; then
+    log_msg "❌ Invalid Zabbix version: $ZBX_VERSION. Allowed versions are: 6.0, 6.4, 7.0." yes
+    exit 1
+  fi
+
+  if [[ "$DB" != "mysql" && "$DB" != "pgsql" ]]; then
+    log_msg "❌ Invalid database: $DB. Allowed databases are: mysql, pgsql." yes
+    exit 1
+  fi
+
+  if [[ "$WEBSERVER" != "apache" && "$WEBSERVER" != "nginx" ]]; then
+    log_msg "❌ Invalid webserver: $WEBSERVER. Allowed webservers are: apache, nginx." yes
+    exit 1
+  fi
 fi
 
-if [[ "$DB" != "mysql" && "$DB" != "pgsql" ]]; then
-  log_msg "❌ Invalid database: $DB. Allowed databases are: mysql, pgsql." yes
-  exit 1
-fi
-
-if [[ "$WEBSERVER" != "apache" && "$WEBSERVER" != "nginx" ]]; then
-  log_msg "❌ Invalid webserver: $WEBSERVER. Allowed webservers are: apache, nginx." yes
-  exit 1
-fi
-
-# Prompt for database password in manual mode
-if [[ "$MODE" == "manual" && -z "$DB_PASSWORD" ]]; then
+# Prompt for database password in manual mode for install
+if [[ "$ACTION" == "install" && "$MODE" == "manual" && -z "$DB_PASSWORD" ]]; then
   echo "Enter database password: " >&3
   read -s DB_PASSWORD >&3
   echo >&3
@@ -498,7 +607,7 @@ if [[ "$MODE" == "manual" && -z "$DB_PASSWORD" ]]; then
     log_msg "❌ Database password cannot be empty." yes
     exit 1
   fi
-elif [[ "$MODE" == "default" ]]; then
+elif [[ "$ACTION" == "install" && "$MODE" == "default" ]]; then
   DB_PASSWORD="zabbix_password"
   log_msg "Using default database password." yes
 fi
@@ -506,56 +615,88 @@ fi
 # Detect OS
 get_os_info
 
-# Confirm installation
-print_center_box "Zabbix $ZBX_VERSION Installation"
-print_msg "ℹ️ Installing Zabbix $ZBX_VERSION with $DB and $WEBSERVER on $DISTRO $OS_VERSION ($ARCH)"
-echo "⚠️ Continue? (y/n): " >&3
-read -r confirm >&3
-log_msg "User confirmation: $confirm" yes
-if [[ "$confirm" != "y" ]]; then
-  log_msg "❌ Aborted by user." yes
-  exit 1
-fi
+# Execute action
+case "$ACTION" in
+  install)
+    # Confirm installation
+    print_center_box "Zabbix $ZBX_VERSION Installation"
+    print_msg "ℹ️ Installing Zabbix $ZBX_VERSION with $DB and $WEBSERVER on $DISTRO $OS_VERSION ($ARCH)"
+    echo "⚠️ Continue? (y/n): " >&3
+    read -r confirm >&3
+    log_msg "User confirmation: $confirm" yes
+    if [[ "$confirm" != "y" ]]; then
+      log_msg "❌ Aborted by user." yes
+      exit 1
+    fi
 
-# Install prerequisites
-case "$DISTRO" in
-  ubuntu)
-    log_msg "Updating apt package index..." yes
-    apt update || { log_msg "❌ Failed to update apt." yes; exit 1; }
-    log_msg "Installing prerequisites (wget, curl)..." yes
-    apt install -y wget curl || { log_msg "❌ Failed to install prerequisites." yes; exit 1; }
+    # Install prerequisites
+    case "$DISTRO" in
+      ubuntu)
+        log_msg "Updating apt package index..." yes
+        apt update || { log_msg "❌ Failed to update apt." yes; exit 1; }
+        log_msg "Installing prerequisites (wget, curl)..." yes
+        apt install -y wget curl || { log_msg "❌ Failed to install prerequisites." yes; exit 1; }
+        ;;
+      sles)
+        log_msg "Installing prerequisites (wget, curl)..." yes
+        zypper install -y wget curl || { log_msg "❌ Failed to install prerequisites." yes; exit 1; }
+        ;;
+      centos)
+        log_msg "Installing prerequisites (wget, curl)..." yes
+        dnf install -y wget curl || { log_msg "❌ Failed to install prerequisites." yes; exit 1; }
+        ;;
+      *)
+        log_msg "❌ Distro $DISTRO is not supported." yes
+        exit 1
+        ;;
+    esac
+    log_msg "✅ Prerequisites installed." yes
+    print_progress "Prerequisites Installation"
+
+    # Install database
+    install_database "$DB"
+
+    # Install Zabbix
+    install_zabbix "$ZBX_VERSION" "$DB" "$WEBSERVER"
+
+    # Configure database
+    configure_database "$DB" "$DB_PASSWORD"
+
+    # Configure Zabbix server
+    configure_zabbix_server "$DB" "$DB_PASSWORD"
+
+    print_center_box "Installation Complete"
+    print_msg "✅ Zabbix $ZBX_VERSION is installed and configured."
+    print_msg "🌐 Access the Zabbix frontend at http://<server_ip>/zabbix"
+    print_msg "👤 Default login: Admin / zabbix"
+    print_msg "📜 Log file: $LOG_FILE"
+    print_msg "⚙️ Configuration file: $CONFIG_FILE"
     ;;
-  sles)
-    log_msg "Installing prerequisites (wget, curl)..." yes
-    zypper install -y wget curl || { log_msg "❌ Failed to install prerequisites." yes; exit 1; }
+  upgrade)
+    # Confirm upgrade
+    print_center_box "Zabbix $ZBX_VERSION Upgrade"
+    print_msg "ℹ️ Upgrading Zabbix to $ZBX_VERSION with $DB and $WEBSERVER on $DISTRO $OS_VERSION ($ARCH)"
+    echo "⚠️ Continue? (y/n): " >&3
+    read -r confirm >&3
+    log_msg "User confirmation: $confirm" yes
+    if [[ "$confirm" != "y" ]]; then
+      log_msg "❌ Aborted by user." yes
+      exit 1
+    fi
+
+    # Perform upgrade
+    upgrade_zabbix "$ZBX_VERSION" "$DB" "$WEBSERVER"
+
+    print_center_box "Upgrade Complete"
+    print_msg "✅ Zabbix upgraded to $ZBX_VERSION."
+    print_msg "🌐 Access the Zabbix frontend at http://<server_ip>/zabbix"
+    print_msg "📜 Log file: $LOG_FILE"
+    print_msg "⚠️ Clear browser cache if the web interface has issues."
     ;;
-  centos)
-    log_msg "Installing prerequisites (wget, curl)..." yes
-    dnf install -y wget curl || { log_msg "❌ Failed to install prerequisites." yes; exit 1; }
-    ;;
-  *)
-    log_msg "❌ Distro $DISTRO is not supported." yes
-    exit 1
+  uninstall)
+    uninstall_zabbix
+    print_center_box "Uninstallation Complete"
+    print_msg "✅ Zabbix has been uninstalled."
+    print_msg "📜 Log file: $LOG_FILE"
     ;;
 esac
-log_msg "✅ Prerequisites installed." yes
-print_progress "Prerequisites Installation"
-
-# Install database
-install_database "$DB"
-
-# Install Zabbix
-install_zabbix "$ZBX_VERSION" "$DB" "$WEBSERVER"
-
-# Configure database
-configure_database "$DB" "$DB_PASSWORD"
-
-# Configure Zabbix server
-configure_zabbix_server "$DB" "$DB_PASSWORD"
-
-print_center_box "Installation Complete"
-print_msg "✅ Zabbix $ZBX_VERSION is installed and configured."
-print_msg "🌐 Access the Zabbix frontend at http://<server_ip>/zabbix"
-print_msg "👤 Default login: Admin / zabbix"
-print_msg "📜 Log file: $LOG_FILE"
-print_msg "⚙️ Configuration file: $CONFIG_FILE"
