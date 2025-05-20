@@ -559,5 +559,3 @@ print_msg "🌐 Access the Zabbix frontend at http://<server_ip>/zabbix"
 print_msg "👤 Default login: Admin / zabbix"
 print_msg "📜 Log file: $LOG_FILE"
 print_msg "⚙️ Configuration file: $CONFIG_FILE"
-
-k
