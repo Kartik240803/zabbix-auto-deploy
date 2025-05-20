@@ -15,4 +15,4 @@ jobs:
         run: chmod +x ./zabbix-deployer.sh
 
       - name: Run Zabbix Installer Script
-        run: sudo ./zabbix-deployer.sh --install --default --version 6.0 --db mysql --webserver apache
+        run: yes | sudo ./zabbix-deployer.sh --install --default --version 6.0 --db mysql --webserver apache
