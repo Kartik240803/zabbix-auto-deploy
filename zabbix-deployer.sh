@@ -3,7 +3,7 @@
 # ------------------------
 # Zabbix Auto Installer with Upgrade Functionality
 # Enhanced Script with Local Config File, Logging, Progress Bar, and Robust Error Handling
-# Updated for latest Zabbix repository URL structure and robust version parsing
+# Updated for latest Zabbix repository URL structure, robust version parsing, and expanded distribution support
 # ------------------------
 
 # Log file setup
@@ -91,6 +91,11 @@ get_os_info() {
     . /etc/os-release
     DISTRO=$ID
     OS_VERSION=$VERSION_ID
+    # Handle Amazon Linux
+    if [[ "$DISTRO" == "amzn" ]]; then
+      DISTRO="amazonlinux"
+      OS_VERSION=$(grep '^VERSION=' /etc/os-release | cut -d'"' -f2)
+    fi
   else
     log_msg "❌ Unsupported Linux distribution." yes
     exit 1
@@ -112,6 +117,7 @@ get_zabbix_repo_url() {
   local os_version="$3"
   local arch="$4"
   local url=""
+  local nosignature="no"
 
   log_msg "Generating repo URL for version=$version, distro=$distro, os_version=$os_version, arch=$arch" yes
 
@@ -123,11 +129,25 @@ get_zabbix_repo_url() {
         url="https://repo.zabbix.com/zabbix/${version}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_${version}+ubuntu${os_version}_all.deb"
       fi
       ;;
-    sles)
-      url="https://repo.zabbix.com/zabbix/${version}/sles/${os_version}/${arch}/zabbix-release-${version}-1.sles${os_version}.noarch.rpm"
+    debian|raspbian)
+      if [[ "$arch" == "arm64" && "$version" != "6.0" ]]; then
+        url="https://repo.zabbix.com/zabbix/${version}/debian-arm64/pool/main/z/zabbix-release/zabbix-release_latest_${version}+debian${os_version}_all.deb"
+      else
+        url="https://repo.zabbix.com/zabbix/${version}/debian/pool/main/z/zabbix-release/zabbix-release_latest_${version}+debian${os_version}_all.deb"
+      fi
       ;;
-    centos)
-      url="https://repo.zabbix.com/zabbix/${version}/rhel/${os_version}/${arch}/zabbix-release-${version}-1.el${os_version}.noarch.rpm"
+    sles)
+      url="https://repo.zabbix.com/zabbix/${version}/sles/${os_version}/${arch}/zabbix-release-latest-${version}.sles${os_version}.noarch.rpm"
+      nosignature="yes"
+      ;;
+    centos|alma|oracle|rocky)
+      url="https://repo.zabbix.com/zabbix/${version}/${distro}/${os_version}/${arch}/zabbix-release-latest-${version}.el${os_version}.noarch.rpm"
+      ;;
+    rhel)
+      url="https://repo.zabbix.com/zabbix/${version}/rhel/${os_version}/${arch}/zabbix-release-latest-${version}.el${os_version}.noarch.rpm"
+      ;;
+    amazonlinux)
+      url="https://repo.zabbix.com/zabbix/${version}/amazonlinux/${os_version}/${arch}/zabbix-release-latest-${version}.amzn${os_version}.noarch.rpm"
       ;;
     *)
       log_msg "❌ Unsupported distro: $distro" yes
@@ -135,8 +155,8 @@ get_zabbix_repo_url() {
       ;;
   esac
 
-  log_msg "Generated repo URL: $url" yes
-  echo "$url"
+  log_msg "Generated repo URL: $url (nosignature=$nosignature)" yes
+  echo "$url $nosignature"
 }
 
 # Backup Zabbix components
@@ -173,7 +193,7 @@ install_database() {
   local db="$1"
   log_msg "📦 Installing $db server..." yes
   case "$DISTRO" in
-    ubuntu)
+    ubuntu|debian|raspbian)
       if [[ "$db" == "mysql" ]]; then
         # Try mysql-server first, fallback to mariadb-server for ARM64
         log_msg "Attempting to install mysql-server..." yes
@@ -200,7 +220,7 @@ install_database() {
         systemctl start postgresql || { log_msg "❌ Failed to start postgresql service." yes; exit 1; }
       fi
       ;;
-    centos)
+    centos|alma|oracle|rocky|rhel|amazonlinux)
       if [[ "$db" == "mysql" ]]; then
         dnf install -y mariadb-server || { log_msg "❌ Failed to install mariadb-server." yes; exit 1; }
         systemctl enable mariadb || { log_msg "❌ Failed to enable mariadb service." yes; exit 1; }
@@ -289,12 +309,12 @@ install_zabbix() {
   local version="$1"
   local db="$2"
   local webserver="$3"
-  local url=$(get_zabbix_repo_url "$version" "$DISTRO" "$OS_VERSION" "$ARCH")
+  read -r url nosignature <<< $(get_zabbix_repo_url "$version" "$DISTRO" "$OS_VERSION" "$ARCH")
 
   log_msg "🌐 Installing Zabbix $version for $DISTRO $OS_VERSION with $db and $webserver..." yes
 
   case "$DISTRO" in
-    ubuntu)
+    ubuntu|debian|raspbian)
       log_msg "Downloading Zabbix repository: $url" yes
       wget -q --timeout=10 --tries=3 "$url" -O /tmp/zabbix-release.deb || {
         log_msg "❌ Failed to download Zabbix repo: $url. Check network or URL availability." yes
@@ -333,7 +353,11 @@ install_zabbix() {
       ;;
     sles)
       log_msg "Downloading Zabbix repository: $url" yes
-      rpm -Uvh --nosignature "$url" || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+      if [[ "$nosignature" == "yes" ]]; then
+        rpm -Uvh --nosignature "$url" || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+      else
+        rpm -Uvh "$url" || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+      fi
       zypper --gpg-auto-import-keys refresh 'Zabbix Official Repository' || { log_msg "❌ Failed to refresh Zabbix repo." yes; exit 1; }
 
       local packages=()
@@ -361,7 +385,7 @@ install_zabbix() {
         systemctl restart zabbix-server zabbix-agent2 nginx php-fpm || { log_msg "❌ Failed to restart services." yes; exit 1; }
       fi
       ;;
-    centos)
+    centos|alma|oracle|rocky|rhel|amazonlinux)
       log_msg "Downloading Zabbix repository: $url" yes
       rpm -Uvh "$url" || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
       dnf clean all || { log_msg "❌ Failed to clean dnf cache." yes; exit 1; }
@@ -403,7 +427,7 @@ upgrade_zabbix() {
   local version="$1"
   local db="$2"
   local webserver="$3"
-  local url=$(get_zabbix_repo_url "$version" "$DISTRO" "$OS_VERSION" "$ARCH")
+  read -r url nosignature <<< $(get_zabbix_repo_url "$version" "$DISTRO" "$OS_VERSION" "$ARCH")
 
   log_msg "🔄 Upgrading Zabbix to version $version for $DISTRO $OS_VERSION with $db and $webserver..." yes
 
@@ -411,9 +435,9 @@ upgrade_zabbix() {
   log_msg "🛑 Stopping Zabbix services..." yes
   systemctl stop zabbix-server zabbix-agent2 || { log_msg "❌ Failed to stop Zabbix services." yes; exit 1; }
   if [[ "$webserver" == "apache" ]]; then
-    systemctl stop apache2 || { log_msg "❌ Failed to stop apache2." yes; exit 1; }
+    systemctl stop apache2 || systemctl stop httpd || { log_msg "❌ Failed to stop apache2/httpd." yes; exit 1; }
   elif [[ "$webserver" == "nginx" ]]; then
-    systemctl stop nginx php8.1-fpm || { log_msg "❌ Failed to stop nginx or php8.1-fpm." yes; exit 1; }
+    systemctl stop nginx php8.1-fpm || systemctl stop nginx php-fpm || { log_msg "❌ Failed to stop nginx or php-fpm." yes; exit 1; }
   fi
 
   # Backup Zabbix components
@@ -421,13 +445,29 @@ upgrade_zabbix() {
 
   # Update repository
   log_msg "🌐 Updating Zabbix repository to version $version: $url" yes
-  wget -q --timeout=10 --tries=3 "$url" -O /tmp/zabbix-release.deb || {
-    log_msg "❌ Failed to download Zabbix repo: $url. Check network or URL availability." yes
-    log_msg "Try manually: wget $url" yes
-    exit 1
-  }
-  dpkg -i /tmp/zabbix-release.deb || { log_msg "❌ Failed to install Zabbix repo package." yes; exit 1; }
-  apt update || { log_msg "❌ Failed to update apt after adding Zabbix repo." yes; exit 1; }
+  case "$DISTRO" in
+    ubuntu|debian|raspbian)
+      wget -q --timeout=10 --tries=3 "$url" -O /tmp/zabbix-release.deb || {
+        log_msg "❌ Failed to download Zabbix repo: $url. Check network or URL availability." yes
+        log_msg "Try manually: wget $url" yes
+        exit 1
+      }
+      dpkg -i /tmp/zabbix-release.deb || { log_msg "❌ Failed to install Zabbix repo package." yes; exit 1; }
+      apt update || { log_msg "❌ Failed to update apt after adding Zabbix repo." yes; exit 1; }
+      ;;
+    sles)
+      if [[ "$nosignature" == "yes" ]]; then
+        rpm -Uvh --nosignature "$url" || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+      else
+        rpm -Uvh "$url" || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+      fi
+      zypper --gpg-auto-import-keys refresh 'Zabbix Official Repository' || { log_msg "❌ Failed to refresh Zabbix repo." yes; exit 1; }
+      ;;
+    centos|alma|oracle|rocky|rhel|amazonlinux)
+      rpm -Uvh "$url" || { log_msg "❌ Failed to download Zabbix repo: $url" yes; exit 1; }
+      dnf clean all || { log_msg "❌ Failed to clean dnf cache." yes; exit 1; }
+      ;;
+  esac
   print_progress "Repository Update"
 
   # Upgrade Zabbix packages
@@ -445,17 +485,26 @@ upgrade_zabbix() {
   fi
 
   log_msg "📦 Upgrading Zabbix packages: ${packages[*]}" yes
-  # Use --only-upgrade to ensure only installed packages are updated
-  DEBIAN_FRONTEND=noninteractive apt install -y --only-upgrade "${packages[@]}" || { log_msg "❌ Failed to upgrade Zabbix packages: ${packages[*]}" yes; exit 1; }
+  case "$DISTRO" in
+    ubuntu|debian|raspbian)
+      DEBIAN_FRONTEND=noninteractive apt install -y --only-upgrade "${packages[@]}" || { log_msg "❌ Failed to upgrade Zabbix packages: ${packages[*]}" yes; exit 1; }
+      ;;
+    sles)
+      zypper install -y --force "${packages[@]}" || { log_msg "❌ Failed to upgrade Zabbix packages: ${packages[*]}" yes; exit 1; }
+      ;;
+    centos|alma|oracle|rocky|rhel|amazonlinux)
+      dnf upgrade -y "${packages[@]}" || { log_msg "❌ Failed to upgrade Zabbix packages: ${packages[*]}" yes; exit 1; }
+      ;;
+  esac
   print_progress "Zabbix Upgrade"
 
   # Restart services
   log_msg "🔄 Restarting services..." yes
   systemctl restart zabbix-server zabbix-agent2 || { log_msg "❌ Failed to restart Zabbix services." yes; exit 1; }
   if [[ "$webserver" == "apache" ]]; then
-    systemctl restart apache2 || { log_msg "❌ Failed to restart apache2." yes; exit 1; }
+    systemctl restart apache2 || systemctl restart httpd || { log_msg "❌ Failed to restart apache2/httpd." yes; exit 1; }
   elif [[ "$webserver" == "nginx" ]]; then
-    systemctl restart nginx php8.1-fpm || { log_msg "❌ Failed to restart nginx or php8.1-fpm." yes; exit 1; }
+    systemctl restart nginx php8.1-fpm || systemctl restart nginx php-fpm || { log_msg "❌ Failed to restart nginx or php-fpm." yes; exit 1; }
   fi
   print_progress "Service Restart"
 
@@ -504,7 +553,7 @@ uninstall_zabbix() {
 
   log_msg "📦 Detecting installed Zabbix packages..." yes
   case "$DISTRO" in
-    ubuntu)
+    ubuntu|debian|raspbian)
       ZBX_PACKAGES=$(dpkg -l | awk '/^ii/ && $2 ~ /^zabbix/ { print $2 }')
       if [[ -n "$ZBX_PACKAGES" ]]; then
         log_msg "🧹 Removing the following Zabbix packages: $ZBX_PACKAGES" yes
@@ -526,7 +575,7 @@ uninstall_zabbix() {
       fi
       zypper clean || log_msg "⚠️ Failed to clean zypper cache." yes
       ;;
-    centos)
+    centos|alma|oracle|rocky|rhel|amazonlinux)
       ZBX_PACKAGES=$(rpm -qa | grep ^zabbix)
       if [[ -n "$ZBX_PACKAGES" ]]; then
         log_msg "🧹 Removing the following Zabbix packages: $ZBX_PACKAGES" yes
@@ -621,8 +670,8 @@ if [[ "$ACTION" != "uninstall" ]]; then
     exit 1
   fi
 
-  if [[ ! "$ZBX_VERSION" =~ ^(6\.0|6\.4|7\.0)$ ]]; then
-    log_msg "❌ Invalid Zabbix version: $ZBX_VERSION. Allowed versions are: 6.0, 6.4, 7.0." yes
+  if [[ ! "$ZBX_VERSION" =~ ^(6\.0|7\.0)$ ]]; then
+    log_msg "❌ Invalid Zabbix version: $ZBX_VERSION. Allowed versions are: 6.0, 7.0." yes
     exit 1
   fi
 
@@ -671,7 +720,7 @@ case "$ACTION" in
 
     # Install prerequisites
     case "$DISTRO" in
-      ubuntu)
+      ubuntu|debian|raspbian)
         log_msg "Updating apt package index..." yes
         apt update || { log_msg "❌ Failed to update apt." yes; exit 1; }
         log_msg "Installing prerequisites (wget, curl)..." yes
@@ -681,7 +730,7 @@ case "$ACTION" in
         log_msg "Installing prerequisites (wget, curl)..." yes
         zypper install -y wget curl || { log_msg "❌ Failed to install prerequisites." yes; exit 1; }
         ;;
-      centos)
+      centos|alma|oracle|rocky|rhel|amazonlinux)
         log_msg "Installing prerequisites (wget, curl)..." yes
         dnf install -y wget curl || { log_msg "❌ Failed to install prerequisites." yes; exit 1; }
         ;;
