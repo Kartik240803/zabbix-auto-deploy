@@ -11,8 +11,16 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Verify Required Files Exist
+        run: |
+          if [ ! -f ./zabbix_server_config.conf ]; then
+            echo "Error: Required config file zabbix_server_config.conf not found."
+            exit 1
+          fi
+
       - name: Make Script Executable
         run: chmod +x ./zabbix-deployer.sh
 
       - name: Run Zabbix Installer Script
-        run: yes | sudo ./zabbix-deployer.sh --install --default --version 6.0 --db mysql --webserver apache
+        run: |
+          sudo ./zabbix-deployer.sh --install --default --version 6.0 --db mysql --webserver apache
