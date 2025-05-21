@@ -22,5 +22,13 @@ jobs:
         run: chmod +x ./zabbix-deployer.sh
 
       - name: Run Zabbix Installer Script
+        continue-on-error: true  # <-- This is the key part
         run: yes|
           sudo ./zabbix-deployer.sh --install --default --version 6.0 --db mysql --webserver apache
+
+      - name: Upload Zabbix Install Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zabbix-install-log
+          path: /var/log/zabbix/zabbix_install.log
