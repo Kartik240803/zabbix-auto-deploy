@@ -31,4 +31,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zabbix-install-log
-          path: /var/log/zabbix/zabbix_install.log
+          path: /var/log/zabbix_install.log
