@@ -1,0 +1,27 @@
+name: SSH into EC2
+
+on:
+  workflow_dispatch: # allows manual trigger
+  push:
+    branches:
+      - main
+
+jobs:
+  ssh-to-ec2:
+    name: SSH into EC2 Instance
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Connect to EC2 via SSH
+      uses: appleboy/ssh-action@v0.1.10
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USER }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        port: 22
+        script: |
+          echo "Connected to EC2 successfully!"
+          uptime
